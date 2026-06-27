@@ -1,0 +1,370 @@
+@use "../variables.scss" as *;
+@use "sass:color";
+
+.app {
+  min-height: 100vh;
+  text-align: left;
+  color: $font;
+  font-size: 12px;
+  padding: 10px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 2px;
+
+  .brand {
+    font-size: 14px;
+    font-weight: 600;
+    color: #eee;
+  }
+  .sub {
+    font-size: 11px;
+    color: $highlight;
+    opacity: 0.6;
+  }
+}
+
+.banner {
+  font-size: 11px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+
+  &.warn {
+    background: rgba($warning, 0.15);
+    border: 1px solid rgba($warning, 0.5);
+    color: $warning;
+  }
+  &.error {
+    background: rgba($error, 0.15);
+    border: 1px solid rgba($error, 0.5);
+    color: color.adjust($error, $lightness: 12%);
+  }
+
+  .link {
+    background: none;
+    border: none;
+    color: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 0;
+    font-size: 11px;
+  }
+}
+
+.card {
+  background: $darkest;
+  border: 1px solid $darker;
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  h2 {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: $highlight;
+  }
+}
+
+/* ---- selection ---- */
+.clip-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  .clip-info {
+    flex: 1;
+    min-width: 0;
+  }
+  .clip-name {
+    font-size: 13px;
+    color: #eee;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    &.muted {
+      color: $dark;
+      font-style: italic;
+    }
+  }
+  .clip-meta {
+    font-size: 10px;
+    color: $highlight;
+    opacity: 0.7;
+    margin-top: 2px;
+  }
+}
+
+/* ---- buttons ---- */
+.btn {
+  font-size: 12px;
+  background: $dark;
+  color: #ddd;
+  border: none;
+  border-radius: 5px;
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+
+  &:hover:not(:disabled) {
+    background: color.adjust($dark, $lightness: 8%);
+  }
+  &.primary {
+    background: $active;
+    color: #fff;
+    &:hover:not(:disabled) {
+      background: color.adjust($active, $lightness: 8%);
+    }
+  }
+  &.block {
+    width: 100%;
+  }
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+/* ---- analysis results ---- */
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.result-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  .label {
+    width: 42px;
+    font-size: 11px;
+    color: $highlight;
+    text-transform: uppercase;
+  }
+  .value {
+    flex: 1;
+    font-size: 13px;
+    color: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  white-space: nowrap;
+
+  &.alta {
+    background: rgba($changed, 0.18);
+    color: $changed;
+  }
+  &.media {
+    background: rgba($warning, 0.18);
+    color: $warning;
+  }
+  &.baixa {
+    background: rgba($error, 0.18);
+    color: color.adjust($error, $lightness: 10%);
+  }
+}
+
+/* ---- controls ---- */
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  > label {
+    font-size: 11px;
+    color: $highlight;
+  }
+}
+
+.speed-val {
+  color: #fff;
+  font-weight: 600;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  input[type="range"] {
+    flex: 1;
+    accent-color: $active;
+  }
+}
+
+.num {
+  width: 58px;
+  background: $darker;
+  border: 1px solid $dark;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 12px;
+  padding: 4px 6px;
+  text-align: right;
+}
+
+.radio-row {
+  display: flex;
+  gap: 16px;
+}
+.radio,
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: $font;
+  cursor: pointer;
+
+  input {
+    accent-color: $active;
+  }
+  .hint {
+    color: $highlight;
+    opacity: 0.6;
+    font-size: 10px;
+  }
+  &.disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+.semitones {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: $highlight;
+}
+
+.note-hint {
+  font-size: 10px;
+  line-height: 1.45;
+  color: $highlight;
+  opacity: 0.75;
+  background: $darker;
+  border-radius: 4px;
+  padding: 7px 9px;
+}
+
+.msg {
+  font-size: 11px;
+  color: $changed;
+  line-height: 1.4;
+}
+
+/* ---- tom / note bar ---- */
+.note-bar {
+  display: flex;
+  gap: 3px;
+}
+.note-cell {
+  flex: 1;
+  font-size: 11px;
+  padding: 7px 0;
+  background: $darker;
+  color: $font;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+  font-variant-numeric: tabular-nums;
+
+  &:hover {
+    background: color.adjust($darker, $lightness: 6%);
+  }
+  &.current {
+    border-color: $highlight;
+  }
+  &.active {
+    background: $active;
+    color: #fff;
+    border-color: $active;
+  }
+}
+.tom-preview {
+  font-size: 12px;
+  color: #fff;
+  .shift {
+    color: $highlight;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* ---- match with reference ---- */
+.ref-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+
+  .btn {
+    white-space: nowrap;
+    min-width: 124px;
+  }
+}
+.ref-chip {
+  flex: 1;
+  min-width: 0;
+  background: $darker;
+  border-radius: 4px;
+  padding: 6px 9px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+
+  &.empty {
+    color: $dark;
+    font-style: italic;
+    font-size: 11px;
+    justify-content: center;
+  }
+  .ref-name {
+    font-size: 12px;
+    color: #eee;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ref-vals {
+    font-size: 10px;
+    color: $highlight;
+    font-variant-numeric: tabular-nums;
+  }
+}
+.match-buttons {
+  display: flex;
+  gap: 6px;
+
+  .btn {
+    flex: 1;
+    padding-left: 6px;
+    padding-right: 6px;
+  }
+}
