@@ -52,8 +52,64 @@ export type SelectedClipInfo = {
   name: string;
   path: string;
   startSeconds: number;
+  /** Source in/out points (seconds into the media file) the clip actually uses. */
+  inSeconds: number;
+  outSeconds: number;
+  /** Length of the used region (outSeconds - inSeconds). 0 = whole file. */
+  durationSeconds: number;
+  /** Audio track index of the selected clip (-1 = unknown / project panel). */
+  trackIndex: number;
+  nodeId: string;
   mediaType: string;
   error: string;
+};
+
+/** True if two track items refer to the same clip (start/end/name match). */
+const sameTrackItem = (a: TrackItem, b: TrackItem): boolean => {
+  try {
+    return (
+      a.start.ticks === b.start.ticks &&
+      a.end.ticks === b.end.ticks &&
+      a.name === b.name
+    );
+  } catch (e) {
+    return false;
+  }
+};
+
+/** Index of the audio track holding `clip`, or -1 if not found. */
+const audioTrackIndexOf = (seq: Sequence, clip: TrackItem): number => {
+  try {
+    for (var t = 0; t < seq.audioTracks.numTracks; t++) {
+      const track = seq.audioTracks[t];
+      for (var c = 0; c < track.clips.numItems; c++) {
+        if (sameTrackItem(track.clips[c], clip)) return t;
+      }
+    }
+  } catch (e) {}
+  return -1;
+};
+
+/**
+ * The currently-selected timeline clip, preferring an audio clip in a linked
+ * A/V selection (this is an audio tool). Returns null if nothing usable.
+ */
+const pickSelectedClip = (seq: Sequence): TrackItem | null => {
+  try {
+    const selection = seq.getSelection();
+    if (selection && selection.length > 0) {
+      var chosen: TrackItem | null = null;
+      for (var i = 0; i < selection.length; i++) {
+        const c = selection[i];
+        if (c && c.projectItem && c.projectItem.getMediaPath()) {
+          if (c.mediaType === "Audio") return c;
+          if (!chosen) chosen = c; // fallback to first usable clip
+        }
+      }
+      return chosen;
+    }
+  } catch (e) {}
+  return null;
 };
 
 /**
@@ -67,37 +123,54 @@ export const getSelectedClipInfo = (): SelectedClipInfo => {
     name: "",
     path: "",
     startSeconds: 0,
+    inSeconds: 0,
+    outSeconds: 0,
+    durationSeconds: 0,
+    trackIndex: -1,
+    nodeId: "",
     mediaType: "",
     error: "",
   };
 
   if (!app.project) {
-    empty.error = "Nenhum projeto aberto.";
+    empty.error = "No project open.";
     return empty;
   }
 
-  // 1) Timeline selection
+  // 1) Timeline selection. Prefer an audio clip (this is an audio tool); a
+  // linked A/V selection exposes both, and we want the audio one.
   const seq = getActiveSequence();
   if (seq) {
     try {
-      const selection = seq.getSelection();
-      if (selection && selection.length > 0) {
-        for (var i = 0; i < selection.length; i++) {
-          const clip = selection[i];
-          if (clip && clip.projectItem) {
-            const path = clip.projectItem.getMediaPath();
-            if (path && path.length > 0) {
-              return {
-                found: true,
-                source: "timeline",
-                name: clip.name,
-                path: path,
-                startSeconds: clip.start ? clip.start.seconds : 0,
-                mediaType: clip.mediaType,
-                error: "",
-              };
-            }
-          }
+      {
+        const chosen = pickSelectedClip(seq);
+        if (chosen) {
+          const path = chosen.projectItem.getMediaPath();
+          var inS = 0;
+          var outS = 0;
+          try {
+            inS = chosen.inPoint ? chosen.inPoint.seconds : 0;
+            outS = chosen.outPoint ? chosen.outPoint.seconds : 0;
+          } catch (e) {}
+          const dur = outS > inS ? outS - inS : 0;
+          var nodeId = "";
+          try {
+            nodeId = chosen.projectItem.nodeId || "";
+          } catch (e) {}
+          return {
+            found: true,
+            source: "timeline",
+            name: chosen.name,
+            path: path,
+            startSeconds: chosen.start ? chosen.start.seconds : 0,
+            inSeconds: inS,
+            outSeconds: outS,
+            durationSeconds: dur,
+            trackIndex: audioTrackIndexOf(seq, chosen),
+            nodeId: nodeId,
+            mediaType: chosen.mediaType,
+            error: "",
+          };
         }
       }
     } catch (e) {}
@@ -114,12 +187,21 @@ export const getSelectedClipInfo = (): SelectedClipInfo => {
             const item = sel[j];
             const p = item.getMediaPath ? item.getMediaPath() : "";
             if (p && p.length > 0) {
+              var pNodeId = "";
+              try {
+                pNodeId = item.nodeId || "";
+              } catch (e) {}
               return {
                 found: true,
                 source: "project",
                 name: item.name,
                 path: p,
                 startSeconds: 0,
+                inSeconds: 0,
+                outSeconds: 0,
+                durationSeconds: 0,
+                trackIndex: -1,
+                nodeId: pNodeId,
                 mediaType: "",
                 error: "",
               };
@@ -130,7 +212,7 @@ export const getSelectedClipInfo = (): SelectedClipInfo => {
     }
   } catch (e) {}
 
-  empty.error = "Nenhum clipe de áudio selecionado.";
+  empty.error = "No audio clip selected.";
   return empty;
 };
 
@@ -168,32 +250,53 @@ export const getCurrentSequenceInfo = (): SequenceInfo => {
 
 export type MarkersResult = { created: number; error: string };
 
-/** Drop one sequence marker per timestamp (seconds, from clip start). */
+/**
+ * Drop one CLIP marker per timestamp onto the selected clip's media item.
+ * Markers live on the clip (projectItem.getMarkers()), so timestamps are in
+ * SOURCE time — offset by the clip's inPoint so they land on the used region.
+ */
 export const createBeatMarkers = (
   timestamps: number[],
-  offsetSeconds: number,
   label: string
 ): MarkersResult => {
   const seq = getActiveSequence();
-  if (!seq) return { created: 0, error: "Nenhuma sequência ativa." };
-  var markers;
-  try {
-    markers = seq.getMarkers();
-  } catch (e) {
-    return { created: 0, error: "Markers indisponíveis nesta sequência." };
-  }
-  if (!markers) return { created: 0, error: "Markers indisponíveis." };
+  if (!seq) return { created: 0, error: "No active sequence." };
 
-  const base = typeof offsetSeconds === "number" ? offsetSeconds : 0;
+  const clip = pickSelectedClip(seq);
+  if (!clip || !clip.projectItem) {
+    return { created: 0, error: "No clip selected for markers." };
+  }
+
+  // Clip markers live on the media item (the source), not the sequence ruler.
+  var markers: any = null;
+  try {
+    markers = clip.projectItem.getMarkers();
+  } catch (e) {}
+  if (!markers || typeof markers.createMarker !== "function") {
+    return { created: 0, error: "Markers unavailable on this clip." };
+  }
+
+  // Source-relative base: beats were measured from the clip's inPoint.
+  var base = 0;
+  try {
+    base = clip.inPoint ? clip.inPoint.seconds : 0;
+  } catch (e) {}
+
   const name = label && label.length > 0 ? label : "Beat";
   var created = 0;
+  var lastErr = "";
   for (var i = 0; i < timestamps.length; i++) {
     try {
       markers.createMarker(base + timestamps[i], name, 0, "");
       created++;
-    } catch (e) {}
+    } catch (e: any) {
+      lastErr = e && e.message ? e.message : String(e);
+    }
   }
-  return { created: created, error: created > 0 ? "" : "Falha ao criar markers." };
+  return {
+    created: created,
+    error: created > 0 ? "" : lastErr || "Failed to create markers.",
+  };
 };
 
 export type ImportResult = {
@@ -204,16 +307,18 @@ export type ImportResult = {
 };
 
 /**
- * Re-imports a processed file into the Project panel and (optionally) drops it
- * onto the active sequence's first audio track at `atSeconds`.
+ * Re-imports a processed file into the Project panel and (optionally) overwrites
+ * it onto the timeline at `atSeconds` on audio track `trackIndex`. When
+ * `trackIndex` is negative (e.g. project-panel source) it defaults to track 0.
  */
 export const importAndInsert = (
   path: string,
   atSeconds: number,
-  insert: boolean
+  insert: boolean,
+  trackIndex: number
 ): ImportResult => {
   if (!app.project) {
-    return { success: false, name: "", inserted: false, error: "Nenhum projeto aberto." };
+    return { success: false, name: "", inserted: false, error: "No project open." };
   }
 
   var bin;
@@ -226,7 +331,7 @@ export const importAndInsert = (
 
   const ok = app.project.importFiles([path], true, bin, false);
   if (!ok) {
-    return { success: false, name: "", inserted: false, error: "Falha ao importar o arquivo." };
+    return { success: false, name: "", inserted: false, error: "Failed to import the file." };
   }
 
   // Locate the freshly-imported item by its media path.
@@ -242,7 +347,10 @@ export const importAndInsert = (
     const seq = getActiveSequence();
     if (seq) {
       try {
-        const track = seq.audioTracks[0];
+        var idx =
+          typeof trackIndex === "number" && trackIndex >= 0 ? trackIndex : 0;
+        if (idx >= seq.audioTracks.numTracks) idx = 0;
+        const track = seq.audioTracks[idx];
         if (track) {
           const time = secondsToTime(typeof atSeconds === "number" ? atSeconds : 0);
           inserted = track.overwriteClip(imported, time);

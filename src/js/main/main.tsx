@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { evalTS, subscribeBackgroundColor } from "../lib/utils/bolt";
+import { Docs, type DocLang } from "./Docs";
 import {
   analyzeClip,
   timeStretch,
@@ -9,9 +10,27 @@ import {
   noteMatchShift,
   tempoMatchSpeed,
   type AnalysisResult,
-  type StretchQuality,
+  type AudioRegion,
 } from "../lib/audio";
 import { checkBinaries, clearBinaryCache, type BinStatus } from "../lib/binaries";
+import {
+  Activity,
+  AudioLines,
+  Music2,
+  Wand2,
+  ArrowUpDown,
+  Flag,
+  Target,
+  GitCompareArrows,
+  ArrowRight,
+  RefreshCw,
+  RotateCcw,
+  TriangleAlert,
+  CircleAlert,
+  CircleCheck,
+  Loader2,
+  Info,
+} from "lucide-react";
 import "./main.scss";
 
 // --- bridge return shapes (mirror src/jsx/ppro/ppro.ts) ---
@@ -21,6 +40,11 @@ type SelectedClipInfo = {
   name: string;
   path: string;
   startSeconds: number;
+  inSeconds: number;
+  outSeconds: number;
+  durationSeconds: number;
+  trackIndex: number;
+  nodeId: string;
   mediaType: string;
   error: string;
 };
@@ -30,42 +54,42 @@ type Clip = { info: SelectedClipInfo; analysis: AnalysisResult };
 const inCEP = typeof window !== "undefined" && !!(window as any).cep;
 
 const confidenceLabel: Record<string, string> = {
-  alta: "alta confiança",
-  media: "confiança média",
-  baixa: "baixa confiança",
+  alta: "high",
+  media: "mid",
+  baixa: "low",
 };
 
-const fmtCents = (c: number) => (c > 0 ? `+${c}` : `${c}`);
-const fmtSt = (n: number) => (n > 0 ? `+${n} st` : `${n} st`);
+const fmtSt = (n: number) => (n > 0 ? `+${n}` : `${n}`);
 const noteValid = (n: string) => !!n && n !== "—";
+
+// One-octave keyboard geometry (12 pitch classes).
+const WHITE = [0, 2, 4, 5, 7, 9, 11]; // C D E F G A B
+const KW = 100 / WHITE.length;
+const BLACK = [
+  { pc: 1, b: 1 },
+  { pc: 3, b: 2 },
+  { pc: 6, b: 4 },
+  { pc: 8, b: 5 },
+  { pc: 10, b: 6 },
+];
 
 export const App = () => {
   const [bgColor, setBgColor] = useState("#1e1e1e");
 
-  // selection
+  // selection + analysis (one flow)
   const [clip, setClip] = useState<SelectedClipInfo | null>(null);
-  const [selecting, setSelecting] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
 
   // binaries
   const [bins, setBins] = useState<BinStatus[]>([]);
 
-  // analysis
-  const [analyzing, setAnalyzing] = useState(false);
-  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
-  const [markersMsg, setMarkersMsg] = useState("");
-
-  // tom (target note)
+  // transform: tempo + pitch (one Rubber Band pass)
+  const [speed, setSpeed] = useState(1);
+  const [pitchMode, setPitchMode] = useState<"nota" | "semitons">("nota");
   const [targetNote, setTargetNote] = useState(0); // pitch class 0=C..11=B
-  const [applyingTom, setApplyingTom] = useState(false);
-  const [tomMsg, setTomMsg] = useState("");
-
-  // stretch
-  const [speed, setSpeed] = useState(1.25);
-  const [quality, setQuality] = useState<StretchQuality>("hq");
-  const [pitchIndependent, setPitchIndependent] = useState(false);
   const [semitones, setSemitones] = useState(0);
   const [processing, setProcessing] = useState(false);
-  const [processMsg, setProcessMsg] = useState("");
 
   // match with reference
   const [ref, setRef] = useState<Clip | null>(null);
@@ -73,16 +97,25 @@ export const App = () => {
   const [settingRef, setSettingRef] = useState(false);
   const [settingTarget, setSettingTarget] = useState(false);
   const [matching, setMatching] = useState<"" | "tom" | "bpm" | "both">("");
-  const [matchMsg, setMatchMsg] = useState("");
 
-  // global error
-  const [error, setError] = useState("");
+  // docs + toasts
+  const [docs, setDocs] = useState(false);
+  const [docLang, setDocLang] = useState<DocLang>("en");
+  const toastSeq = useRef(0);
+  const [toasts, setToasts] = useState<
+    { id: number; kind: "ok" | "warn" | "error"; text: string }[]
+  >([]);
+
+  const toast = (kind: "ok" | "warn" | "error", text: string) => {
+    const id = ++toastSeq.current;
+    setToasts((t) => [...t, { id, kind, text }]);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
+  };
 
   useEffect(() => {
     if (inCEP) {
       subscribeBackgroundColor(setBgColor);
       setBins(checkBinaries());
-      refreshSelection();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -92,47 +125,30 @@ export const App = () => {
   const rbReady = binFound("rubberband");
 
   const handleBinaryError = (e: unknown) => {
-    setError(e instanceof Error ? e.message : String(e));
-  };
-
-  const grabAndAnalyze = async (): Promise<Clip | null> => {
-    const info = (await evalTS("getSelectedClipInfo")) as SelectedClipInfo;
-    if (!info.found) {
-      setError(info.error || "Nenhum clipe selecionado.");
-      return null;
-    }
-    const analysis = await analyzeClip(info.path);
-    return { info, analysis };
+    toast("error", e instanceof Error ? e.message : String(e));
   };
 
   const offsetFor = (info: SelectedClipInfo) =>
     info.source === "timeline" ? info.startSeconds : 0;
 
-  const refreshSelection = async () => {
-    setSelecting(true);
-    setError("");
-    setMarkersMsg("");
+  // The source slice the timeline clip uses (undefined = whole media file).
+  const regionFor = (info: SelectedClipInfo): AudioRegion | undefined =>
+    info.source === "timeline" && info.durationSeconds > 0
+      ? { startSec: info.inSeconds, durationSec: info.durationSeconds }
+      : undefined;
+
+  // single entry point: read the current selection AND analyze it
+  const analyze = async () => {
+    setAnalyzing(true);
     try {
       const info = (await evalTS("getSelectedClipInfo")) as SelectedClipInfo;
       setClip(info);
-      setAnalysis(null);
-      if (!info.found && info.error) setError(info.error);
-    } catch (e) {
-      handleBinaryError(e);
-    } finally {
-      setSelecting(false);
-    }
-  };
-
-  const runAnalysis = async () => {
-    if (!clip?.found) return;
-    setAnalyzing(true);
-    setError("");
-    setMarkersMsg("");
-    setTomMsg("");
-    setAnalysis(null);
-    try {
-      const res = await analyzeClip(clip.path);
+      if (!info.found) {
+        setAnalysis(null);
+        toast("error", info.error || "No audio clip selected.");
+        return;
+      }
+      const res = await analyzeClip(info.path, regionFor(info));
       setAnalysis(res);
       if (noteValid(res.note.note)) setTargetNote(((res.note.midi % 12) + 12) % 12);
     } catch (e) {
@@ -142,37 +158,44 @@ export const App = () => {
     }
   };
 
+  const grabAndAnalyze = async (): Promise<Clip | null> => {
+    const info = (await evalTS("getSelectedClipInfo")) as SelectedClipInfo;
+    if (!info.found) {
+      toast("error", info.error || "No clip selected.");
+      return null;
+    }
+    const a = await analyzeClip(info.path, regionFor(info));
+    return { info, analysis: a };
+  };
+
   const createMarkers = async () => {
     if (!clip?.found || !analysis) return;
-    setMarkersMsg("");
-    setError("");
     try {
       const res = (await evalTS(
         "createBeatMarkers",
         analysis.bpm.beats,
-        offsetFor(clip),
         "Beat"
       )) as { created: number; error: string };
-      setMarkersMsg(res.error ? `⚠ ${res.error}` : `✓ ${res.created} markers criados.`);
+      if (res.error) toast("warn", res.error);
+      else toast("ok", `${res.created} beat markers created.`);
     } catch (e) {
       handleBinaryError(e);
     }
   };
 
-  // --- manual stretch ---
+  // --- transform: tempo + pitch in one pass ---
   const process = async () => {
     if (!clip?.found) return;
     setProcessing(true);
-    setProcessMsg("");
-    setError("");
     try {
       const { output } = await timeStretch(clip.path, {
         speed,
-        quality,
-        pitchIndependent: quality === "hq" && pitchIndependent,
-        pitchSemitones: semitones,
+        quality: "hq", // always Rubber Band R3
+        pitchIndependent: pitchSt !== 0,
+        pitchSemitones: pitchSt,
+        region: regionFor(clip),
       });
-      await reimport(output, offsetFor(clip), setProcessMsg);
+      await reimport(output, offsetFor(clip), clip.trackIndex);
     } catch (e) {
       handleBinaryError(e);
     } finally {
@@ -180,37 +203,9 @@ export const App = () => {
     }
   };
 
-  // --- apply target note (barra de tom) ---
-  const applyTom = async () => {
-    if (!clip?.found || !analysis || !noteValid(analysis.note.note)) return;
-    const shift = pitchClassShift(analysis.note.midi, targetNote);
-    setTomMsg("");
-    setError("");
-    if (shift === 0) {
-      setTomMsg(`Já está em ${NOTE_NAMES[targetNote]} — nada a transpor.`);
-      return;
-    }
-    setApplyingTom(true);
-    try {
-      const { output } = await timeStretch(clip.path, {
-        speed: 1,
-        quality: "hq",
-        pitchIndependent: true,
-        pitchSemitones: shift,
-      });
-      await reimport(output, offsetFor(clip), setTomMsg);
-    } catch (e) {
-      handleBinaryError(e);
-    } finally {
-      setApplyingTom(false);
-    }
-  };
-
   // --- reference / target ---
   const captureRef = async () => {
     setSettingRef(true);
-    setError("");
-    setMatchMsg("");
     try {
       const c = await grabAndAnalyze();
       if (c) setRef(c);
@@ -223,8 +218,6 @@ export const App = () => {
 
   const captureTarget = async () => {
     setSettingTarget(true);
-    setError("");
-    setMatchMsg("");
     try {
       const c = await grabAndAnalyze();
       if (c) setTarget(c);
@@ -252,8 +245,6 @@ export const App = () => {
 
   const match = async (kind: "tom" | "bpm" | "both") => {
     if (!ref || !target) return;
-    setMatchMsg("");
-    setError("");
 
     const doTom = kind === "tom" || kind === "both";
     const doBpm = kind === "bpm" || kind === "both";
@@ -261,11 +252,11 @@ export const App = () => {
     const sp = doBpm ? bpmSpeed : 1;
 
     if (doTom && shift === 0 && (!doBpm || Math.abs(sp - 1) < 0.001)) {
-      setMatchMsg("Alvo já está casado com a referência — nada a fazer.");
+      toast("warn", "Target already matches the reference — nothing to do.");
       return;
     }
     if (kind === "bpm" && Math.abs(sp - 1) < 0.001) {
-      setMatchMsg("BPM já está igual — nada a fazer.");
+      toast("warn", "BPM already matches — nothing to do.");
       return;
     }
 
@@ -276,8 +267,9 @@ export const App = () => {
         quality: "hq",
         pitchIndependent: doTom && shift !== 0,
         pitchSemitones: shift,
+        region: regionFor(target.info),
       });
-      await reimport(output, offsetFor(target.info), setMatchMsg);
+      await reimport(output, offsetFor(target.info), target.info.trackIndex);
     } catch (e) {
       handleBinaryError(e);
     } finally {
@@ -285,240 +277,269 @@ export const App = () => {
     }
   };
 
-  // shared: reimport + insert, write status into the given setter
-  const reimport = async (
-    output: string,
-    offset: number,
-    setMsg: (s: string) => void
-  ) => {
-    const imp = (await evalTS("importAndInsert", output, offset, true)) as {
+  // shared: reimport + overwrite onto the clip's own track
+  const reimport = async (output: string, offset: number, trackIndex: number) => {
+    const imp = (await evalTS("importAndInsert", output, offset, true, trackIndex)) as {
       success: boolean;
       name: string;
       inserted: boolean;
       error: string;
     };
-    if (!imp.success) setMsg(`⚠ Processado, mas falhou ao reimportar: ${imp.error}`);
-    else if (imp.inserted) setMsg("✓ Reimportado e inserido na timeline.");
-    else setMsg("✓ Reimportado no projeto (sem sequência ativa p/ inserir).");
+    if (!imp.success) toast("warn", `Processed, but reimport failed: ${imp.error}`);
+    else if (imp.inserted) toast("ok", "Replaced on timeline.");
+    else toast("ok", "Reimported into project (no active sequence).");
   };
 
   const recheckBinaries = () => {
     clearBinaryCache();
     setBins(checkBinaries());
-    setError("");
   };
 
-  const curPc = analysis && noteValid(analysis.note.note)
-    ? ((analysis.note.midi % 12) + 12) % 12
-    : -1;
-  const tomShiftPreview =
-    analysis && noteValid(analysis.note.note)
-      ? pitchClassShift(analysis.note.midi, targetNote)
-      : 0;
+  const ready = !!clip?.found;
+  const hasTom = !!analysis && noteValid(analysis.note.note);
+  const curPc = hasTom ? ((analysis!.note.midi % 12) + 12) % 12 : -1;
+
+  // Effective pitch shift (semitones) the transform will apply.
+  const pitchSt =
+    pitchMode === "nota"
+      ? hasTom
+        ? pitchClassShift(analysis!.note.midi, targetNote)
+        : 0
+      : semitones;
+  const transformNoop = Math.abs(speed - 1) < 0.001 && pitchSt === 0;
+  // Everything goes through Rubber Band (HQ); ffmpeg still decodes/slices.
+  const transformReady = rbReady && binFound("ffmpeg");
+
+  if (docs) {
+    return <Docs lang={docLang} onLang={setDocLang} onClose={() => setDocs(false)} />;
+  }
 
   return (
     <div className="app" style={{ backgroundColor: bgColor }}>
+      <div className="toasts">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast ${t.kind}`}>
+            {t.kind === "ok" ? (
+              <CircleCheck size={14} />
+            ) : t.kind === "warn" ? (
+              <TriangleAlert size={14} />
+            ) : (
+              <CircleAlert size={14} />
+            )}
+            <span>{t.text}</span>
+          </div>
+        ))}
+      </div>
+
       <header className="topbar">
-        <span className="brand">Fly Audio Toolkit</span>
-        <span className="sub">galeguei</span>
+        <span className="brand">
+          <AudioLines size={16} className="brand-icon" />
+          Beat&nbsp;Match
+        </span>
+        <button className="info-btn" onClick={() => setDocs(true)} title="User guide">
+          <Info size={16} />
+        </button>
       </header>
 
       {!inCEP && (
         <div className="banner warn">
-          Preview no navegador — análise e processamento só funcionam dentro do
-          Premiere Pro.
+          <TriangleAlert size={14} />
+          Browser preview — analysis and processing only run inside Premiere Pro.
         </div>
       )}
 
       {missing.length > 0 && (
         <div className="banner error">
-          Binários ausentes: <b>{missing.map((m) => m.name).join(", ")}</b>.
+          <TriangleAlert size={14} />
+          <span>
+            Missing binaries: <b>{missing.map((m) => m.name).join(", ")}</b>
+          </span>
           <button className="link" onClick={recheckBinaries}>
-            verificar novamente
+            <RefreshCw size={11} /> recheck
           </button>
         </div>
       )}
-
-      {error && (
-        <div className="banner error">
-          {error}
-          <button className="link" onClick={() => setError("")}>
-            ✕
-          </button>
-        </div>
-      )}
-
-      {/* ---- Selection ---- */}
-      <section className="card">
-        <div className="clip-row">
-          <div className="clip-info">
-            {clip?.found ? (
-              <>
-                <div className="clip-name" title={clip.path}>
-                  {clip.name}
-                </div>
-                <div className="clip-meta">
-                  {clip.source === "timeline" ? "timeline" : "project panel"}
-                  {clip.mediaType ? ` · ${clip.mediaType}` : ""}
-                </div>
-              </>
-            ) : (
-              <div className="clip-name muted">Nenhum clipe selecionado</div>
-            )}
-          </div>
-          <button className="btn" onClick={refreshSelection} disabled={selecting}>
-            {selecting ? "…" : "Atualizar seleção"}
-          </button>
-        </div>
-      </section>
 
       {/* ---- Analysis ---- */}
       <section className="card">
-        <h2>Análise</h2>
-        <button
-          className="btn primary block"
-          onClick={runAnalysis}
-          disabled={!clip?.found || analyzing}
-        >
-          {analyzing ? "Analisando…" : "Analisar áudio"}
-        </button>
-
-        {analysis && (
-          <div className="results">
-            <div className="result-line">
-              <span className="label">BPM</span>
-              <span className="value">{analysis.bpm.bpm || "—"}</span>
-              <Badge level={analysis.bpm.confidence} />
-            </div>
-            <div className="result-line">
-              <span className="label">Nota</span>
-              <span className="value">
-                {analysis.note.note}
-                {analysis.note.frequency
-                  ? ` · ${analysis.note.frequency} Hz · ${fmtCents(analysis.note.cents)} cents`
-                  : ""}
-              </span>
-              <Badge level={analysis.note.confidence} />
-            </div>
-            <button
-              className="btn block"
-              onClick={createMarkers}
-              disabled={!analysis.bpm.beats.length}
-            >
-              Criar markers de batida ({analysis.bpm.beats.length})
-            </button>
-            {markersMsg && <div className="msg">{markersMsg}</div>}
-          </div>
-        )}
-      </section>
-
-      {/* ---- Tom (target note) ---- */}
-      <section className="card">
-        <h2>Tom</h2>
-        {!analysis || !noteValid(analysis.note.note) ? (
-          <div className="note-hint">
-            Analise um clipe com tom detectável para escolher a nota alvo.
-          </div>
-        ) : (
-          <>
-            <div className="note-bar">
-              {NOTE_NAMES.map((nm, i) => (
-                <button
-                  key={nm}
-                  className={`note-cell ${targetNote === i ? "active" : ""} ${
-                    curPc === i ? "current" : ""
-                  }`}
-                  onClick={() => setTargetNote(i)}
-                  title={curPc === i ? "nota atual" : ""}
-                >
-                  {nm}
-                </button>
-              ))}
-            </div>
-            <div className="tom-preview">
-              {analysis.note.note} → {NOTE_NAMES[targetNote]}{" "}
-              <span className="shift">({fmtSt(tomShiftPreview)})</span>
-            </div>
-            <button
-              className="btn primary block"
-              onClick={applyTom}
-              disabled={!rbReady || applyingTom}
-            >
-              {applyingTom ? "Aplicando…" : "Aplicar tom (Rubber Band)"}
-            </button>
-            {tomMsg && <div className="msg">{tomMsg}</div>}
-          </>
-        )}
-      </section>
-
-      {/* ---- Time-stretch ---- */}
-      <section className="card">
-        <h2>Time-stretch</h2>
-        <div className="control">
-          <label>
-            Velocidade <span className="speed-val">{speed.toFixed(2)}x</span>
-          </label>
-          <div className="slider-row">
-            <input
-              type="range"
-              min={0.5}
-              max={2}
-              step={0.01}
-              value={speed}
-              onChange={(e) => setSpeed(parseFloat(e.target.value))}
-            />
-            <input
-              type="number"
-              className="num"
-              min={0.1}
-              max={8}
-              step={0.05}
-              value={speed}
-              onChange={(e) => setSpeed(parseFloat(e.target.value) || 1)}
-            />
+        <div className="clip-row">
+          <AudioLines size={15} className={ready ? "ic" : "ic muted"} />
+          <div className="clip-name" title={ready ? clip!.path : ""}>
+            {ready ? clip!.name : <span className="muted">No clip selected</span>}
           </div>
         </div>
 
-        <div className="control">
-          <label>Qualidade</label>
-          <div className="radio-row">
-            <label className="radio">
-              <input
-                type="radio"
-                name="quality"
-                checked={quality === "fast"}
-                onChange={() => setQuality("fast")}
-              />
-              Rápido <span className="hint">(ffmpeg)</span>
-            </label>
-            <label className="radio">
-              <input
-                type="radio"
-                name="quality"
-                checked={quality === "hq"}
-                onChange={() => setQuality("hq")}
-              />
-              Alta qualidade <span className="hint">(Rubber Band)</span>
-            </label>
+        <div className="readouts">
+          <div className="readout">
+            <Activity size={14} className="ic" />
+            <span className={`big ${analysis ? "" : "muted"}`}>
+              {analysis ? analysis.bpm.bpm || "—" : "—"}
+            </span>
+            <span className="unit">BPM</span>
+            {analysis && <Badge level={analysis.bpm.confidence} />}
+          </div>
+          <div className="readout">
+            <Music2 size={14} className="ic" />
+            <span className={`big ${analysis ? "" : "muted"}`}>
+              {analysis ? analysis.note.note : "—"}
+            </span>
+            <span className="unit">key</span>
+            {analysis && <Badge level={analysis.note.confidence} />}
           </div>
         </div>
 
-        <div className="control">
-          <label
-            className={`checkbox ${quality !== "hq" ? "disabled" : ""}`}
-            title={quality !== "hq" ? "Disponível apenas no modo Alta qualidade" : ""}
+        <div className="btn-group">
+          <button className="btn soft" onClick={analyze} disabled={analyzing}>
+            {analyzing ? (
+              <>
+                <Loader2 size={14} className="spin" /> Analyzing…
+              </>
+            ) : (
+              <>
+                <Activity size={14} /> {analysis ? "Re-analyze" : "Analyze"}
+              </>
+            )}
+          </button>
+          <button
+            className="btn soft"
+            onClick={createMarkers}
+            disabled={!analysis?.bpm.beats.length}
           >
-            <input
-              type="checkbox"
-              disabled={quality !== "hq"}
-              checked={pitchIndependent}
-              onChange={(e) => setPitchIndependent(e.target.checked)}
-            />
-            Alterar pitch independente
-          </label>
-          {quality === "hq" && pitchIndependent && (
-            <div className="semitones">
-              <span>Semitons</span>
+            <Flag size={13} /> Markers
+            {analysis?.bpm.beats.length ? ` (${analysis.bpm.beats.length})` : ""}
+          </button>
+        </div>
+      </section>
+
+      {/* ---- Transformar (tempo + pitch, one Rubber Band pass) ---- */}
+      <section className="card">
+        <h2>
+          <Wand2 size={12} /> Transform
+        </h2>
+
+        {/* tempo — single row */}
+        <div className="ctl-row">
+          <label>Speed</label>
+          <input
+            type="range"
+            min={0.5}
+            max={2}
+            step={0.01}
+            value={speed}
+            disabled={!ready}
+            onChange={(e) => setSpeed(parseFloat(e.target.value))}
+          />
+          <input
+            type="number"
+            className="num"
+            min={0.1}
+            max={8}
+            step={0.05}
+            value={speed}
+            disabled={!ready}
+            onChange={(e) => setSpeed(parseFloat(e.target.value) || 1)}
+          />
+        </div>
+
+        {/* pitch — by note (piano) or raw semitones */}
+        <div className="control">
+          <div className="segmented">
+            <button
+              className={`seg ${pitchMode === "nota" ? "active" : ""}`}
+              onClick={() => setPitchMode("nota")}
+              disabled={!ready}
+            >
+              <Music2 size={13} /> Note
+            </button>
+            <button
+              className={`seg ${pitchMode === "semitons" ? "active" : ""}`}
+              onClick={() => setPitchMode("semitons")}
+              disabled={!ready}
+            >
+              <ArrowUpDown size={13} /> Semitones
+            </button>
+          </div>
+
+          {pitchMode === "nota" ? (
+            <>
+              <div className={`piano ${!ready || !hasTom ? "disabled" : ""}`}>
+                <div className="whites">
+                  {WHITE.map((pc) => (
+                    <button
+                      key={pc}
+                      className={`wkey ${targetNote === pc ? "active" : ""} ${
+                        curPc === pc ? "current" : ""
+                      }`}
+                      onClick={() => setTargetNote(pc)}
+                      disabled={!ready || !hasTom}
+                      title={curPc === pc ? "nota atual" : NOTE_NAMES[pc]}
+                    >
+                      <span className="kl">{NOTE_NAMES[pc]}</span>
+                      {curPc === pc && <span className="dot" />}
+                    </button>
+                  ))}
+                </div>
+                <div className="blacks">
+                  {BLACK.map((bk) => (
+                    <button
+                      key={bk.pc}
+                      className={`bkey ${targetNote === bk.pc ? "active" : ""} ${
+                        curPc === bk.pc ? "current" : ""
+                      }`}
+                      style={{
+                        left: `${(bk.b - 0.31) * KW}%`,
+                        width: `${0.62 * KW}%`,
+                      }}
+                      onClick={() => setTargetNote(bk.pc)}
+                      disabled={!ready || !hasTom}
+                      title={curPc === bk.pc ? "nota atual" : NOTE_NAMES[bk.pc]}
+                    >
+                      {curPc === bk.pc && <span className="dot" />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="transpose">
+                {hasTom ? (
+                  <>
+                    <span className="from">{analysis!.note.note.replace(/\d+$/, "")}</span>
+                    <ArrowRight size={14} className="arr" />
+                    <span className="to">{NOTE_NAMES[targetNote]}</span>
+                    <span className={`delta ${pitchSt === 0 ? "zero" : ""}`}>
+                      {pitchSt === 0 ? "no change" : `${fmtSt(pitchSt)} st`}
+                    </span>
+                    {curPc >= 0 && targetNote !== curPc && (
+                      <button
+                        className="icon-only reset"
+                        title="Back to original key"
+                        onClick={() => setTargetNote(curPc)}
+                      >
+                        <RotateCcw size={13} />
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <span className="muted-line">
+                    {ready
+                      ? "No detectable key — use Semitones."
+                      : "Analyze a clip to detect its key."}
+                  </span>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="ctl-row">
+              <label>Semitones</label>
+              <input
+                type="range"
+                min={-12}
+                max={12}
+                step={1}
+                value={semitones}
+                disabled={!ready}
+                onChange={(e) => setSemitones(parseInt(e.target.value))}
+              />
               <input
                 type="number"
                 className="num"
@@ -526,87 +547,88 @@ export const App = () => {
                 max={24}
                 step={1}
                 value={semitones}
+                disabled={!ready}
                 onChange={(e) => setSemitones(parseInt(e.target.value) || 0)}
               />
             </div>
           )}
         </div>
 
-        {quality === "fast" && (
-          <div className="note-hint">
-            Modo rápido preserva o pitch mas pode introduzir artefatos em
-            stretches grandes. Para drones/SFX tonais use Alta qualidade.
-          </div>
-        )}
-
+        {/* process */}
         <button
           className="btn primary block"
           onClick={process}
-          disabled={
-            !clip?.found ||
-            processing ||
-            (quality === "hq" && !rbReady) ||
-            (quality === "fast" && !binFound("ffmpeg"))
-          }
+          disabled={!ready || processing || transformNoop || !transformReady}
         >
-          {processing ? "Processando…" : "Processar e reimportar"}
+          {processing ? (
+            <>
+              <Loader2 size={14} className="spin" /> Processing…
+            </>
+          ) : (
+            <>
+              <Wand2 size={14} /> Process &amp; replace
+            </>
+          )}
         </button>
-        {processMsg && <div className="msg">{processMsg}</div>}
       </section>
 
-      {/* ---- Match with reference ---- */}
+      {/* ---- Match to reference ---- */}
       <section className="card">
-        <h2>Casar com referência</h2>
+        <h2>
+          <GitCompareArrows size={12} /> Match to reference
+        </h2>
 
-        <div className="ref-row">
-          <button className="btn" onClick={captureRef} disabled={settingRef}>
-            {settingRef ? "…" : "Definir referência"}
-          </button>
-          <ClipChip clip={ref} placeholder="defina o tom/BPM de referência" />
-        </div>
-        <div className="ref-row">
-          <button className="btn" onClick={captureTarget} disabled={settingTarget}>
-            {settingTarget ? "…" : "Definir alvo"}
-          </button>
-          <ClipChip clip={target} placeholder="o áudio que será modificado" />
-        </div>
-
-        {ref && target && (
-          <div className="note-hint">
-            {canMatchTom
-              ? `Tom: ${target.analysis.note.note} → ${ref.analysis.note.note} (${fmtSt(tomShift)})`
-              : "Tom: indisponível (nota não detectada)"}
-            {"  ·  "}
-            {canMatchBpm
-              ? `BPM: ${target.analysis.bpm.bpm} → ${ref.analysis.bpm.bpm} (${bpmSpeed}x)`
-              : "BPM: indisponível"}
+        <div className="ref-group">
+          <div className="ref-row">
+            <button className="btn ref-btn" onClick={captureRef} disabled={settingRef}>
+              {settingRef ? <Loader2 size={13} className="spin" /> : <Target size={13} />}
+              Reference
+            </button>
+            <ClipChip clip={ref} placeholder="the key/BPM to match" />
           </div>
-        )}
+          <div className="ref-row">
+            <button
+              className="btn ref-btn"
+              onClick={captureTarget}
+              disabled={settingTarget}
+            >
+              {settingTarget ? <Loader2 size={13} className="spin" /> : <AudioLines size={13} />}
+              Target
+            </button>
+            <ClipChip clip={target} placeholder="the audio to be modified" />
+          </div>
+        </div>
 
         <div className="match-buttons">
           <button
-            className="btn primary"
+            className="btn soft"
             onClick={() => match("tom")}
             disabled={!canMatchTom || matching !== ""}
           >
-            {matching === "tom" ? "…" : "Igualar tom"}
+            {matching === "tom" ? <Loader2 size={13} className="spin" /> : <Music2 size={13} />}
+            Key
           </button>
           <button
-            className="btn primary"
+            className="btn soft"
             onClick={() => match("bpm")}
             disabled={!canMatchBpm || matching !== ""}
           >
-            {matching === "bpm" ? "…" : "Igualar BPM"}
+            {matching === "bpm" ? <Loader2 size={13} className="spin" /> : <Activity size={13} />}
+            BPM
           </button>
           <button
             className="btn primary"
             onClick={() => match("both")}
             disabled={!(canMatchTom && canMatchBpm) || matching !== ""}
           >
-            {matching === "both" ? "…" : "Tom + BPM"}
+            {matching === "both" ? (
+              <Loader2 size={13} className="spin" />
+            ) : (
+              <GitCompareArrows size={13} />
+            )}
+            Both
           </button>
         </div>
-        {matchMsg && <div className="msg">{matchMsg}</div>}
       </section>
     </div>
   );

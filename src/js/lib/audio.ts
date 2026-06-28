@@ -10,7 +10,7 @@
 // ===========================================================================
 
 import { child_process, fs, os, path } from "./cep/node";
-import { getBinary, BinName } from "./binaries";
+import { getBinary, getAubio, AubioSub, BinName } from "./binaries";
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -21,9 +21,9 @@ export class BinaryMissingError extends Error {
   binary: BinName;
   constructor(binary: BinName) {
     super(
-      `Binário "${binary}" não encontrado. Instale-o (Homebrew: brew install ${
+      `Binary "${binary}" not found. Install it (Homebrew: brew install ${
         binary === "ffmpeg" || binary === "ffprobe" ? "ffmpeg" : binary
-      }) ou inclua um build em bin/.`
+      }) or bundle a build under bin/.`
     );
     this.name = "BinaryMissingError";
     this.binary = binary;
@@ -34,6 +34,13 @@ const requireBin = (name: BinName): string => {
   const p = getBinary(name);
   if (!p) throw new BinaryMissingError(name);
   return p;
+};
+
+/** Resolve an aubio subcommand invocation or throw the UI-friendly error. */
+const requireAubio = (sub: AubioSub): { cmd: string; pre: string[] } => {
+  const a = getAubio(sub);
+  if (!a) throw new BinaryMissingError("aubio");
+  return a;
 };
 
 // ---------------------------------------------------------------------------
@@ -48,7 +55,7 @@ const run = (cmd: string, args: string[]): Promise<RunResult> =>
     try {
       proc = child_process.spawn(cmd, args);
     } catch (e: any) {
-      reject(new Error("Falha ao iniciar processo: " + (e && e.message ? e.message : e)));
+      reject(new Error("Failed to start process: " + (e && e.message ? e.message : e)));
       return;
     }
     let stdout = "";
@@ -65,7 +72,7 @@ let tmpSeq = 0;
 const tmpFile = (ext: string): string => {
   tmpSeq++;
   const stamp = `${Date.now()}_${Math.floor(Math.random() * 1e6)}_${tmpSeq}`;
-  return path.join(os.tmpdir(), `galeguei_${stamp}${ext}`);
+  return path.join(os.tmpdir(), `beatmatch_${stamp}${ext}`);
 };
 
 const safeUnlink = (file: string): void => {
@@ -135,25 +142,59 @@ export const hzToNote = (hz: number): NoteInfo => {
 // Decode
 // ---------------------------------------------------------------------------
 
+/**
+ * A slice of the source media (seconds). When passed to decode/analyze/stretch
+ * we only touch the portion the clip actually uses on the timeline, instead of
+ * the whole media file.
+ */
+export type AudioRegion = { startSec: number; durationSec: number };
+
+const hasRegion = (r?: AudioRegion): r is AudioRegion =>
+  !!r && r.durationSec > 0;
+
 /** Decode any input to mono 44.1 kHz 16-bit PCM WAV (temp file). */
-export const decodeToWav = async (input: string): Promise<string> => {
+export const decodeToWav = async (
+  input: string,
+  region?: AudioRegion
+): Promise<string> => {
+  const ffmpeg = requireBin("ffmpeg");
+  const out = tmpFile(".wav");
+  const args = ["-y", "-i", input];
+  // -ss/-t after -i = sample-accurate trim of just the used region.
+  if (hasRegion(region)) {
+    args.push("-ss", String(Math.max(0, region.startSec)), "-t", String(region.durationSec));
+  }
+  args.push("-ac", "1", "-ar", "44100", "-c:a", "pcm_s16le", out);
+  const res = await run(ffmpeg, args);
+  if (res.code !== 0 || !fs.existsSync(out)) {
+    safeUnlink(out);
+    throw new Error("ffmpeg failed to decode the clip.\n" + res.stderr.slice(-500));
+  }
+  return out;
+};
+
+/** Extract a region of the source media to a temp WAV (for region stretching). */
+const extractRegion = async (
+  input: string,
+  region: AudioRegion
+): Promise<string> => {
   const ffmpeg = requireBin("ffmpeg");
   const out = tmpFile(".wav");
   const res = await run(ffmpeg, [
     "-y",
     "-i",
     input,
-    "-ac",
-    "1",
-    "-ar",
-    "44100",
+    "-ss",
+    String(Math.max(0, region.startSec)),
+    "-t",
+    String(region.durationSec),
     "-c:a",
     "pcm_s16le",
     out,
   ]);
   if (res.code !== 0 || !fs.existsSync(out)) {
     safeUnlink(out);
-    throw new Error("ffmpeg falhou ao decodificar o clipe.\n" + res.stderr.slice(-500));
+    throw new Error("ffmpeg failed to extract the clip region.\n" + res.stderr.slice(-500));
   }
   return out;
 };
@@ -167,17 +208,19 @@ export type Confidence = "alta" | "media" | "baixa";
 export type BpmResult = { bpm: number; confidence: Confidence; beats: number[] };
 
 const detectBeats = async (wav: string): Promise<number[]> => {
-  const aubio = requireBin("aubio");
-  const res = await run(aubio, ["beat", wav]);
+  const { cmd, pre } = requireAubio("beat");
+  const res = await run(cmd, pre.concat(wav));
   return parseTimes(res.stdout);
 };
 
 /** BPM via `aubio tempo`, with a confidence score from beat regularity. */
 export const analyzeBPM = async (wav: string): Promise<BpmResult> => {
-  const aubio = requireBin("aubio");
-  const res = await run(aubio, ["tempo", wav]);
+  const { cmd, pre } = requireAubio("tempo");
+  const res = await run(cmd, pre.concat(wav));
+  // Unix `aubio tempo` prints "<n> bpm"; the Windows aubiotrack tool prints
+  // beat times only, so fall back to deriving BPM from the intervals below.
   const m = res.stdout.match(/([0-9]+(?:\.[0-9]+)?)\s*bpm/i);
-  const bpm = m ? Math.round(parseFloat(m[1]) * 100) / 100 : 0;
+  let bpm = m ? Math.round(parseFloat(m[1]) * 100) / 100 : 0;
 
   // Confidence: how regular are the inter-beat intervals?
   let confidence: Confidence = "baixa";
@@ -189,6 +232,10 @@ export const analyzeBPM = async (wav: string): Promise<BpmResult> => {
       for (let i = 1; i < beats.length; i++) intervals.push(beats[i] - beats[i - 1]);
       const cv = mean(intervals) > 0 ? stddev(intervals) / mean(intervals) : 1;
       confidence = cv < 0.08 ? "alta" : cv < 0.2 ? "media" : "baixa";
+      if (!bpm) {
+        const ibi = median(intervals);
+        if (ibi > 0) bpm = Math.round((60 / ibi) * 100) / 100;
+      }
     }
   } catch (e) {}
 
@@ -206,8 +253,8 @@ export type NoteResult = {
 
 /** Fundamental note via `aubio pitch` (median of stable voiced frames). */
 export const detectNote = async (wav: string): Promise<NoteResult> => {
-  const aubio = requireBin("aubio");
-  const res = await run(aubio, ["pitch", wav]);
+  const { cmd, pre } = requireAubio("pitch");
+  const res = await run(cmd, pre.concat(wav));
 
   const freqs: number[] = [];
   let totalFrames = 0;
@@ -268,8 +315,8 @@ export const tempoMatchSpeed = (fromBpm: number, toBpm: number): number =>
 
 /** Onset timestamps (seconds) via `aubio onset`. */
 export const detectOnsets = async (wav: string): Promise<number[]> => {
-  const aubio = requireBin("aubio");
-  const res = await run(aubio, ["onset", wav]);
+  const { cmd, pre } = requireAubio("onset");
+  const res = await run(cmd, pre.concat(wav));
   return parseTimes(res.stdout);
 };
 
@@ -303,8 +350,11 @@ const probeDuration = async (wav: string): Promise<number> => {
  * High-level: decode once, then run BPM + note analysis, then clean up.
  * Returns beats (for marker placement) inside `bpm.beats`.
  */
-export const analyzeClip = async (input: string): Promise<AnalysisResult> => {
-  const wav = await decodeToWav(input);
+export const analyzeClip = async (
+  input: string,
+  region?: AudioRegion
+): Promise<AnalysisResult> => {
+  const wav = await decodeToWav(input, region);
   try {
     const bpm = await analyzeBPM(wav);
     const note = await detectNote(wav);
@@ -330,6 +380,8 @@ export type StretchOptions = {
   pitchIndependent: boolean;
   /** Semitones to shift when pitchIndependent is true. */
   pitchSemitones: number;
+  /** Process only this slice of the source (the region the clip uses). */
+  region?: AudioRegion;
 };
 
 /** Chain atempo filters so we can exceed the per-instance 0.5–2.0 range. */
@@ -352,7 +404,7 @@ const buildOutputPath = (input: string, opts: StretchOptions): string => {
   const dir = path.dirname(input);
   const ext = path.extname(input);
   const base = path.basename(input, ext);
-  let tag = "_galeguei_" + opts.speed + "x";
+  let tag = "_beatmatch_" + opts.speed + "x";
   if (opts.quality === "hq" && opts.pitchIndependent && opts.pitchSemitones !== 0) {
     const s = opts.pitchSemitones > 0 ? "+" + opts.pitchSemitones : "" + opts.pitchSemitones;
     tag += "_p" + s;
@@ -381,34 +433,47 @@ export const timeStretch = async (
   } catch (e) {
     writable = false;
   }
-  if (!writable) output = tmpFile(path.basename(output).replace(/^.*?(_galeguei)/, "$1"));
+  if (!writable) output = tmpFile(path.basename(output).replace(/^.*?(_beatmatch)/, "$1"));
 
-  if (opts.quality === "hq") {
-    const rb = requireBin("rubberband");
-    const args = ["-3", "--tempo", String(speed)];
-    if (opts.pitchIndependent && opts.pitchSemitones !== 0) {
-      args.push("-p", String(opts.pitchSemitones));
+  // When a region is given, slice it out first so we only process the audio the
+  // clip actually uses (Rubber Band reads whole files, so it must be pre-cut).
+  let src = input;
+  let tmpRegion = "";
+  if (hasRegion(opts.region)) {
+    tmpRegion = await extractRegion(input, opts.region);
+    src = tmpRegion;
+  }
+
+  try {
+    if (opts.quality === "hq") {
+      const rb = requireBin("rubberband");
+      const args = ["-3", "--tempo", String(speed)];
+      if (opts.pitchIndependent && opts.pitchSemitones !== 0) {
+        args.push("-p", String(opts.pitchSemitones));
+      }
+      args.push(src, output);
+      const res = await run(rb, args);
+      if (res.code !== 0 || !fs.existsSync(output)) {
+        safeUnlink(output);
+        throw new Error("Rubber Band failed to process.\n" + res.stderr.slice(-500));
+      }
+    } else {
+      const ffmpeg = requireBin("ffmpeg");
+      const res = await run(ffmpeg, [
+        "-y",
+        "-i",
+        src,
+        "-filter:a",
+        buildAtempoChain(speed),
+        output,
+      ]);
+      if (res.code !== 0 || !fs.existsSync(output)) {
+        safeUnlink(output);
+        throw new Error("ffmpeg (atempo) failed to process.\n" + res.stderr.slice(-500));
+      }
     }
-    args.push(input, output);
-    const res = await run(rb, args);
-    if (res.code !== 0 || !fs.existsSync(output)) {
-      safeUnlink(output);
-      throw new Error("Rubber Band falhou no processamento.\n" + res.stderr.slice(-500));
-    }
-  } else {
-    const ffmpeg = requireBin("ffmpeg");
-    const res = await run(ffmpeg, [
-      "-y",
-      "-i",
-      input,
-      "-filter:a",
-      buildAtempoChain(speed),
-      output,
-    ]);
-    if (res.code !== 0 || !fs.existsSync(output)) {
-      safeUnlink(output);
-      throw new Error("ffmpeg (atempo) falhou no processamento.\n" + res.stderr.slice(-500));
-    }
+  } finally {
+    if (tmpRegion) safeUnlink(tmpRegion);
   }
 
   return { output, quality: opts.quality };

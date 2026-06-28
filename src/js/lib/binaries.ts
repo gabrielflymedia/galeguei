@@ -48,12 +48,20 @@ const getExtensionRoot = (): string => {
 const candidateDirs = (): string[] => {
   const dirs: string[] = [];
 
-  // 1) bundled
+  // 1) bundled. __dirname is the panel folder (e.g. dist/cep/main), but the
+  // bundled bin/ is copied to dist/cep/bin — so also check one/two levels up.
   const root = getExtensionRoot();
   if (root) {
-    try {
-      dirs.push(path.join(root, "bin", isWin() ? "win" : "mac"));
-    } catch (e) {}
+    const plat = isWin() ? "win" : "mac";
+    [
+      [root, "bin", plat],
+      [root, "..", "bin", plat],
+      [root, "..", "..", "bin", plat],
+    ].forEach((parts) => {
+      try {
+        dirs.push(path.join.apply(path, parts as [string, ...string[]]));
+      } catch (e) {}
+    });
   }
 
   // 2) common install locations
@@ -81,7 +89,14 @@ const candidateDirs = (): string[] => {
 };
 
 const fileNames = (name: BinName): string[] => {
-  return isWin() ? [name + ".exe", name] : [name];
+  if (isWin()) {
+    // Windows aubio ships as separate tools (aubiopitch.exe, aubiotrack.exe…)
+    // with no unified `aubio` binary — use aubiotrack as the stand-in so the
+    // availability check reflects reality. See getAubio() for invocation.
+    if (name === "aubio") return ["aubiotrack.exe", "aubiopitch.exe"];
+    return [name + ".exe", name];
+  }
+  return [name];
 };
 
 export const resolveBinary = (name: BinName): string | null => {
@@ -111,6 +126,48 @@ export const getBinary = (name: BinName): string | null => {
 /** Forget cached lookups (e.g. after the user installs a missing binary). */
 export const clearBinaryCache = (): void => {
   for (const k in cache) delete cache[k];
+};
+
+// ---------------------------------------------------------------------------
+// aubio — platform-aware subcommand resolution
+//
+// On macOS/Linux aubio exposes a single `aubio <sub>` CLI. The official
+// Windows build instead ships one executable per tool and has no `aubio` nor
+// `aubiotempo` — so `tempo` reuses `aubiotrack` and callers derive BPM from
+// the beat times it prints.
+// ---------------------------------------------------------------------------
+
+export type AubioSub = "beat" | "tempo" | "pitch" | "onset" | "notes";
+
+const AUBIO_WIN: { [k in AubioSub]: string } = {
+  beat: "aubiotrack",
+  tempo: "aubiotrack",
+  pitch: "aubiopitch",
+  onset: "aubioonset",
+  notes: "aubionotes",
+};
+
+/**
+ * Resolve how to invoke an aubio subcommand on this platform.
+ * Returns the executable path plus any leading args (the subcommand on Unix,
+ * nothing on Windows), or null if the executable can't be located.
+ */
+export const getAubio = (
+  sub: AubioSub
+): { cmd: string; pre: string[] } | null => {
+  if (isWin()) {
+    const base = AUBIO_WIN[sub];
+    const dirs = candidateDirs();
+    for (let i = 0; i < dirs.length; i++) {
+      try {
+        const full = path.join(dirs[i], base + ".exe");
+        if (fileExists(full)) return { cmd: full, pre: [] };
+      } catch (e) {}
+    }
+    return null;
+  }
+  const p = getBinary("aubio");
+  return p ? { cmd: p, pre: [sub] } : null;
 };
 
 /** Availability snapshot for the UI. */

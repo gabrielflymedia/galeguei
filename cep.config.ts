@@ -3,10 +3,10 @@ import { version } from "./package.json";
 
 const config: CEP_Config = {
   version,
-  id: "com.galeguei.cep", 
-  displayName: "Galeguei", 
+  id: "com.flymedia.beatmatch",
+  displayName: "Beat Match",
   symlink: "local",
-  port: 3000,
+  port: 3333,
   servePort: 5000,
   startingDebugPort: 8860,
   extensionManifestVersion: 6.0,
@@ -28,7 +28,7 @@ const config: CEP_Config = {
     {
       mainPath: "./main/index.html",
       name: "main",
-      panelDisplayName: "Galeguei", 
+      panelDisplayName: "Beat Match",
       autoVisible: true,
       width: 600,
       height: 650,
@@ -52,7 +52,9 @@ const config: CEP_Config = {
     jsxBin: "off",
   },
   installModules: [],
-  copyAssets: [],
+  // Bundled native tools (aubio/rubberband for Windows) shipped with the
+  // panel. Copied from src/bin → dist/cep/bin; the resolver looks here first.
+  copyAssets: ["bin"],
   copyZipAssets: [],
 };
 export default config;
